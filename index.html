@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="description" content="서버 업로드 없이 브라우저에서 실행되는 로컬 오디오 변환·녹음·Whisper STT 도구" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="./styles.css" />
+  <title>Local Whisper Studio</title>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">LW</div>
+        <div>
+          <h1>Local Whisper Studio</h1>
+          <p>Audio Converter · Recorder · Local Whisper STT</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="themeBtn" class="icon-btn" title="테마 전환" aria-label="테마 전환">◐</button>
+        <button id="installBtn" class="secondary hidden">앱 설치</button>
+        <button id="helpBtn" class="secondary">도움말</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar panel">
+        <section>
+          <div class="section-title-row">
+            <h2>작업</h2>
+            <button id="clearQueueBtn" class="text-btn">전체 비우기</button>
+          </div>
+          <label id="dropZone" class="drop-zone" tabindex="0">
+            <input id="fileInput" type="file" multiple accept="audio/*,.m4a,.aac,.mp3,.wav,.webm,.ogg,.flac,.mp4" hidden />
+            <div class="drop-icon">＋</div>
+            <strong>오디오 파일 추가</strong>
+            <span>M4A · WAV · MP3 · AAC · FLAC · OGG · WebM</span>
+            <small>드래그 앤 드롭 또는 클릭</small>
+          </label>
+          <button id="sampleBtn" class="secondary sample-btn">예제 음성 불러오기</button>
+        </section>
+
+        <section class="recorder-card">
+          <div class="section-title-row">
+            <h2>마이크 녹음</h2>
+            <span id="micStatus" class="badge">대기</span>
+          </div>
+          <div id="recordTimer" class="record-timer">00:00:00</div>
+          <canvas id="meterCanvas" width="320" height="50" aria-label="마이크 레벨"></canvas>
+          <div class="record-controls">
+            <button id="recordBtn" class="danger">● 녹음</button>
+            <button id="pauseRecordBtn" class="secondary" disabled>Ⅱ 일시정지</button>
+            <button id="stopRecordBtn" class="secondary" disabled>■ 종료</button>
+          </div>
+          <div class="field compact">
+            <label for="micSelect">마이크</label>
+            <select id="micSelect"><option value="">기본 마이크</option></select>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-title-row">
+            <h2>파일 큐</h2>
+            <span id="queueCount" class="badge">0</span>
+          </div>
+          <div id="queueList" class="queue-list empty-state">파일을 추가하세요.</div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <div class="panel now-playing">
+          <div class="file-meta-row">
+            <div>
+              <span class="eyebrow">현재 오디오</span>
+              <h2 id="currentFileName">선택된 파일 없음</h2>
+              <p id="currentFileMeta">파일을 추가하거나 녹음을 시작하세요.</p>
+            </div>
+            <div class="privacy-pill">🔒 음성은 서버로 업로드되지 않음</div>
+          </div>
+
+          <canvas id="waveform" width="1200" height="190" aria-label="오디오 파형"></canvas>
+          <audio id="audioPlayer" preload="metadata"></audio>
+
+          <div class="transport">
+            <button id="back10Btn" class="icon-btn" disabled>↶ 10</button>
+            <button id="playBtn" class="play-btn" disabled>▶</button>
+            <button id="forward10Btn" class="icon-btn" disabled>10 ↷</button>
+            <span id="timeDisplay">00:00 / 00:00</span>
+            <input id="seekBar" type="range" min="0" max="1000" value="0" disabled aria-label="재생 위치" />
+            <select id="speedSelect" title="재생 속도">
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1.0×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2.0×</option>
+            </select>
+          </div>
+
+          <div class="range-tools">
+            <span>선택 구간</span>
+            <label>시작 <input id="rangeStart" type="number" min="0" step="0.1" value="0" />초</label>
+            <label>끝 <input id="rangeEnd" type="number" min="0" step="0.1" value="0" />초</label>
+            <button id="setStartBtn" class="secondary" disabled>현재 위치→시작</button>
+            <button id="setEndBtn" class="secondary" disabled>현재 위치→끝</button>
+            <button id="playRangeBtn" class="secondary" disabled>구간 재생</button>
+          </div>
+        </div>
+
+        <div class="two-column">
+          <section class="panel converter-panel">
+            <div class="section-title-row">
+              <div>
+                <span class="eyebrow">CONVERTER</span>
+                <h2>오디오 변환</h2>
+              </div>
+              <span id="ffmpegBadge" class="badge">FFmpeg 미로딩</span>
+            </div>
+
+            <div class="preset-grid">
+              <label class="preset selected">
+                <input type="radio" name="wavPreset" value="stt" checked />
+                <strong>STT 최적화 WAV</strong>
+                <span>16 kHz · Mono · PCM 16-bit</span>
+              </label>
+              <label class="preset">
+                <input type="radio" name="wavPreset" value="original" />
+                <strong>고품질 WAV</strong>
+                <span>48 kHz · Stereo · PCM 16-bit</span>
+              </label>
+              <label class="preset">
+                <input type="radio" name="wavPreset" value="custom" />
+                <strong>사용자 지정</strong>
+                <span>샘플레이트·채널 직접 설정</span>
+              </label>
+            </div>
+
+            <div id="customWavOptions" class="inline-fields hidden">
+              <div class="field"><label>샘플레이트</label><select id="sampleRateSelect"><option>8000</option><option selected>16000</option><option>22050</option><option>44100</option><option>48000</option></select></div>
+              <div class="field"><label>채널</label><select id="channelSelect"><option value="1" selected>Mono</option><option value="2">Stereo</option></select></div>
+            </div>
+
+            <div class="button-row">
+              <button id="loadFfmpegBtn" class="secondary">변환 엔진 준비</button>
+              <button id="convertBtn" class="primary" disabled>WAV 변환</button>
+              <button id="convertRangeBtn" class="secondary" disabled>선택 구간 WAV</button>
+            </div>
+            <div class="progress-wrap">
+              <div class="progress-track"><div id="convertProgress" class="progress-bar"></div></div>
+              <span id="convertStatus">대기 중</span>
+            </div>
+          </section>
+
+          <section class="panel stt-panel">
+            <div class="section-title-row">
+              <div>
+                <span class="eyebrow">LOCAL AI</span>
+                <h2>Whisper STT</h2>
+              </div>
+              <span id="engineBadge" class="badge">환경 확인 중</span>
+            </div>
+
+            <div class="settings-grid">
+              <div class="field">
+                <label for="engineSelect">실행 엔진</label>
+                <select id="engineSelect">
+                  <option value="auto">자동 (WebGPU 우선)</option>
+                  <option value="webgpu">GPU · WebGPU</option>
+                  <option value="wasm">CPU · WebAssembly</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="modelSelect">Whisper 모델</label>
+                <select id="modelSelect">
+                  <option value="onnx-community/whisper-tiny">Tiny · 빠름</option>
+                  <option value="onnx-community/whisper-base" selected>Base · 권장</option>
+                  <option value="onnx-community/whisper-small">Small · 고정밀</option>
+                  <option value="onnx-community/whisper-large-v3-turbo">Large v3 Turbo · 고성능 GPU</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="languageSelect">언어</label>
+                <select id="languageSelect">
+                  <option value="">자동 감지</option>
+                  <option value="ko" selected>한국어</option>
+                  <option value="en">English</option>
+                  <option value="ja">日本語</option>
+                  <option value="zh">中文</option>
+                  <option value="de">Deutsch</option>
+                  <option value="fr">Français</option>
+                  <option value="es">Español</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="taskSelect">작업</label>
+                <select id="taskSelect">
+                  <option value="transcribe" selected>원문 전사</option>
+                  <option value="translate">영어 번역</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="timestampSelect">타임스탬프</label>
+                <select id="timestampSelect">
+                  <option value="segment" selected>구간 단위</option>
+                  <option value="word">단어 단위</option>
+                  <option value="none">없음</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="dtypeSelect">모델 정밀도</label>
+                <select id="dtypeSelect">
+                  <option value="auto" selected>자동 · 권장</option>
+                  <option value="q8">Q8 · 메모리 절약</option>
+                  <option value="q4">Q4 · 최소 용량</option>
+                  <option value="fp16">FP16 · GPU</option>
+                  <option value="fp32">FP32 · 최고 정밀도</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="chunkLength">Chunk 길이</label>
+                <div class="number-unit"><input id="chunkLength" type="number" min="10" max="60" value="30" /><span>초</span></div>
+              </div>
+              <div class="field">
+                <label for="strideLength">Overlap</label>
+                <div class="number-unit"><input id="strideLength" type="number" min="0" max="15" value="5" /><span>초</span></div>
+              </div>
+              <div class="field checkbox-field">
+                <label><input id="rangeOnlyCheckbox" type="checkbox" /> 선택 구간만 STT</label>
+              </div>
+            </div>
+
+            <div class="button-row">
+              <button id="loadModelBtn" class="secondary">AI 모델 준비</button>
+              <button id="transcribeBtn" class="primary" disabled>텍스트 변환</button>
+              <button id="batchTranscribeBtn" class="secondary">대기 파일 일괄 STT</button>
+              <button id="cancelSttBtn" class="secondary" disabled>취소</button>
+            </div>
+            <div class="progress-wrap">
+              <div class="progress-track"><div id="modelProgress" class="progress-bar"></div></div>
+              <span id="sttStatus">모델을 선택하고 준비하세요.</span>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel transcript-panel">
+          <div class="section-title-row transcript-header">
+            <div>
+              <span class="eyebrow">TRANSCRIPT</span>
+              <h2>변환 결과</h2>
+            </div>
+            <div class="button-row wrap">
+              <button id="copyBtn" class="secondary" disabled>복사</button>
+              <button id="downloadTxtBtn" class="secondary" disabled>TXT</button>
+              <button id="downloadMdBtn" class="secondary" disabled>MD</button>
+              <button id="downloadSrtBtn" class="secondary" disabled>SRT</button>
+              <button id="downloadVttBtn" class="secondary" disabled>VTT</button>
+              <button id="downloadJsonBtn" class="secondary" disabled>JSON</button>
+            </div>
+          </div>
+          <div class="transcript-toolbar">
+            <label><input id="showTimestamps" type="checkbox" checked /> 타임스탬프 표시</label>
+            <label><input id="autoScrollTranscript" type="checkbox" checked /> 재생 위치 자동 강조</label>
+            <button id="clearTranscriptBtn" class="text-btn">결과 지우기</button>
+          </div>
+          <div id="transcriptView" class="transcript-view empty-state">STT 결과가 여기에 표시됩니다.</div>
+          <textarea id="transcriptEditor" class="transcript-editor" placeholder="필요하면 전체 텍스트를 직접 수정할 수 있습니다."></textarea>
+        </section>
+
+        <section class="panel system-panel">
+          <div class="section-title-row">
+            <div><span class="eyebrow">SYSTEM</span><h2>환경 및 개인정보</h2></div>
+            <button id="refreshSystemBtn" class="secondary">다시 검사</button>
+          </div>
+          <div id="systemCards" class="system-cards"></div>
+          <details>
+            <summary>로컬 처리와 네트워크 사용 범위</summary>
+            <p>음성·녹음·변환 결과는 브라우저 내부에서 처리됩니다. 최초 AI 모델 및 WebAssembly 엔진 로딩 시 CDN/Hugging Face에서 프로그램 파일과 모델 가중치를 내려받습니다. 음성 파일 자체를 해당 서버로 전송하는 코드는 포함하지 않습니다.</p>
+          </details>
+        </section>
+      </section>
+    </main>
+
+    <footer>
+      <span>Local Whisper Studio · GitHub Pages Ready</span>
+      <span id="footerStatus">브라우저 로컬 처리</span>
+    </footer>
+  </div>
+
+  <dialog id="helpDialog">
+    <form method="dialog" class="dialog-card">
+      <div class="section-title-row"><h2>사용 방법</h2><button class="icon-btn">✕</button></div>
+      <ol>
+        <li>오디오 파일을 추가하거나 마이크로 녹음합니다.</li>
+        <li>M4A 등은 필요하면 <b>WAV 변환</b>으로 16 kHz mono WAV로 저장할 수 있습니다.</li>
+        <li><b>AI 모델 준비</b>를 누르면 선택한 Whisper 모델을 최초 1회 다운로드합니다.</li>
+        <li><b>텍스트 변환</b>을 실행합니다. WebGPU가 있으면 GPU를 우선 사용합니다.</li>
+        <li>결과를 TXT, Markdown, SRT, VTT, JSON으로 저장할 수 있습니다.</li>
+      </ol>
+      <h3>권장 환경</h3>
+      <p>최신 Chrome/Edge + WebGPU 지원 GPU. 큰 모델은 메모리 사용량이 매우 크므로 Base 또는 Small부터 권장합니다.</p>
+      <h3>단축키</h3>
+      <ul><li>Space: 재생/일시정지</li><li>Ctrl/Cmd + O: 파일 열기</li><li>← / →: 5초 이동</li></ul>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

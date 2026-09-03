@@ -1,0 +1,13 @@
+{
+  "name": "Local Whisper Studio",
+  "short_name": "Whisper Studio",
+  "description": "브라우저 로컬 오디오 변환·녹음·Whisper STT",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {"src":"./icons/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}
