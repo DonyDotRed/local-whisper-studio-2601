@@ -7,8 +7,8 @@
   <meta name="description" content="서버 업로드 없이 브라우저에서 실행되는 로컬 오디오 변환·녹음·Whisper STT 도구" />
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="./styles.css" />
-  <title>Local Whisper Studio</title>
+  <link rel="stylesheet" href="./styles.css?v=2.2.0" />
+  <title>Local Whisper Studio 2.2</title>
 </head>
 <body>
   <div id="app">
@@ -166,6 +166,15 @@
 
             <div class="settings-grid">
               <div class="field">
+                <label for="performancePreset">성능 프리셋</label>
+                <select id="performancePreset">
+                  <option value="fast" selected>빠른 전사 · Tiny</option>
+                  <option value="balanced">균형 · Base</option>
+                  <option value="accurate">정확도 · Small</option>
+                  <option value="custom">사용자 지정</option>
+                </select>
+              </div>
+              <div class="field">
                 <label for="engineSelect">실행 엔진</label>
                 <select id="engineSelect">
                   <option value="auto">자동 (WebGPU 우선)</option>
@@ -176,8 +185,8 @@
               <div class="field">
                 <label for="modelSelect">Whisper 모델</label>
                 <select id="modelSelect">
-                  <option value="onnx-community/whisper-tiny">Tiny · 빠름</option>
-                  <option value="onnx-community/whisper-base" selected>Base · 권장</option>
+                  <option value="onnx-community/whisper-tiny" selected>Tiny · 빠름 · 기본</option>
+                  <option value="onnx-community/whisper-base">Base · 균형</option>
                   <option value="onnx-community/whisper-small">Small · 고정밀</option>
                   <option value="onnx-community/whisper-large-v3-turbo">Large v3 Turbo · 고성능 GPU</option>
                 </select>
@@ -213,7 +222,7 @@
               <div class="field">
                 <label for="dtypeSelect">모델 정밀도</label>
                 <select id="dtypeSelect">
-                  <option value="auto" selected>자동 · 권장</option>
+                  <option value="auto" selected>자동 최적화 · 권장</option>
                   <option value="q8">Q8 · 메모리 절약</option>
                   <option value="q4">Q4 · 최소 용량</option>
                   <option value="fp16">FP16 · GPU</option>
@@ -241,8 +250,9 @@
             </div>
             <div class="progress-wrap">
               <div class="progress-track"><div id="modelProgress" class="progress-bar"></div></div>
-              <span id="sttStatus">모델을 선택하고 준비하세요.</span>
+              <span id="sttStatus">빠른 전사(Tiny)로 시작할 수 있습니다.</span>
             </div>
+            <div id="sttMetrics" class="stt-metrics">대기 · 오디오는 STT 시작 시 한 번만 디코딩합니다.</div>
           </section>
         </div>
 
@@ -273,7 +283,10 @@
         <section class="panel system-panel">
           <div class="section-title-row">
             <div><span class="eyebrow">SYSTEM</span><h2>환경 및 개인정보</h2></div>
-            <button id="refreshSystemBtn" class="secondary">다시 검사</button>
+            <div class="button-row wrap">
+              <button id="clearAiCacheBtn" class="secondary">AI 모델 캐시 지우기</button>
+              <button id="refreshSystemBtn" class="secondary">다시 검사</button>
+            </div>
           </div>
           <div id="systemCards" class="system-cards"></div>
           <details>
@@ -285,7 +298,7 @@
     </main>
 
     <footer>
-      <span>Local Whisper Studio · GitHub Pages Ready</span>
+      <span>Local Whisper Studio 2.2 · Optimized GitHub Pages</span>
       <span id="footerStatus">브라우저 로컬 처리</span>
     </footer>
   </div>
@@ -296,18 +309,19 @@
       <ol>
         <li>오디오 파일을 추가하거나 마이크로 녹음합니다.</li>
         <li>M4A 등은 필요하면 <b>WAV 변환</b>으로 16 kHz mono WAV로 저장할 수 있습니다.</li>
-        <li><b>AI 모델 준비</b>를 누르면 선택한 Whisper 모델을 최초 1회 다운로드합니다.</li>
-        <li><b>텍스트 변환</b>을 실행합니다. WebGPU가 있으면 GPU를 우선 사용합니다.</li>
+        <li>처음에는 <b>빠른 전사 · Tiny</b> 프리셋을 권장합니다. 5분 테스트에 가장 적합합니다.</li>
+        <li><b>AI 모델 준비</b>를 누르면 선택한 Whisper 모델을 최초 1회 다운로드하고 브라우저에 캐시합니다.</li>
+        <li><b>텍스트 변환</b>을 실행합니다. WebGPU가 있으면 GPU를 우선 사용하며, 각 Whisper chunk 완료 시 실제 진행률을 표시합니다.</li>
         <li>결과를 TXT, Markdown, SRT, VTT, JSON으로 저장할 수 있습니다.</li>
       </ol>
       <h3>권장 환경</h3>
-      <p>최신 Chrome/Edge + WebGPU 지원 GPU. 큰 모델은 메모리 사용량이 매우 크므로 Base 또는 Small부터 권장합니다.</p>
+      <p>최신 Chrome/Edge + WebGPU 지원 GPU. 5~30분 파일은 Tiny 또는 Base를 권장합니다. Small/Large는 정확도가 필요하고 GPU 여유가 있을 때 사용하세요. GitHub Pages의 CPU(WASM)는 단일 스레드가 될 수 있으므로 Tiny가 가장 안정적입니다.</p>
       <h3>단축키</h3>
       <ul><li>Space: 재생/일시정지</li><li>Ctrl/Cmd + O: 파일 열기</li><li>← / →: 5초 이동</li></ul>
     </form>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=2.2.0"></script>
 </body>
 </html>

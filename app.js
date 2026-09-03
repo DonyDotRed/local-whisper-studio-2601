@@ -5,9 +5,9 @@ const els = Object.fromEntries([
   'fileInput','dropZone','sampleBtn','queueList','queueCount','clearQueueBtn','recordBtn','pauseRecordBtn','stopRecordBtn','recordTimer','meterCanvas','micSelect','micStatus',
   'currentFileName','currentFileMeta','waveform','audioPlayer','playBtn','back10Btn','forward10Btn','timeDisplay','seekBar','speedSelect',
   'rangeStart','rangeEnd','setStartBtn','setEndBtn','playRangeBtn','loadFfmpegBtn','convertBtn','convertRangeBtn','convertProgress','convertStatus','ffmpegBadge',
-  'sampleRateSelect','channelSelect','customWavOptions','engineSelect','modelSelect','languageSelect','taskSelect','timestampSelect','dtypeSelect','chunkLength','strideLength','rangeOnlyCheckbox',
-  'loadModelBtn','transcribeBtn','batchTranscribeBtn','cancelSttBtn','modelProgress','sttStatus','engineBadge','transcriptView','transcriptEditor','showTimestamps','autoScrollTranscript',
-  'copyBtn','downloadTxtBtn','downloadMdBtn','downloadSrtBtn','downloadVttBtn','downloadJsonBtn','clearTranscriptBtn','refreshSystemBtn','systemCards','themeBtn','installBtn','helpBtn','helpDialog','toast','footerStatus'
+  'sampleRateSelect','channelSelect','customWavOptions','performancePreset','engineSelect','modelSelect','languageSelect','taskSelect','timestampSelect','dtypeSelect','chunkLength','strideLength','rangeOnlyCheckbox',
+  'loadModelBtn','transcribeBtn','batchTranscribeBtn','cancelSttBtn','modelProgress','sttStatus','sttMetrics','engineBadge','transcriptView','transcriptEditor','showTimestamps','autoScrollTranscript',
+  'copyBtn','downloadTxtBtn','downloadMdBtn','downloadSrtBtn','downloadVttBtn','downloadJsonBtn','clearTranscriptBtn','clearAiCacheBtn','refreshSystemBtn','systemCards','themeBtn','installBtn','helpBtn','helpDialog','toast','footerStatus'
 ].map(id => [id, $(id)]));
 
 const state = {
@@ -34,11 +34,16 @@ const state = {
   recordAudioContext: null,
   deferredInstallPrompt: null,
   playRangeEnd: null,
-  webgpuAvailable: false
+  webgpuAvailable: false,
+  sttStartedAt: 0,
+  sttLastProgressAt: 0,
+  sttCompletedChunks: 0,
+  sttTotalChunks: 0,
+  sttTicker: 0
 };
 
-const SETTINGS_KEY = 'local-whisper-studio-settings-v1';
-const settingsFields = ['engineSelect','modelSelect','languageSelect','taskSelect','timestampSelect','dtypeSelect','chunkLength','strideLength','speedSelect','showTimestamps','autoScrollTranscript'];
+const SETTINGS_KEY = 'local-whisper-studio-settings-v2-2';
+const settingsFields = ['performancePreset','engineSelect','modelSelect','languageSelect','taskSelect','timestampSelect','dtypeSelect','chunkLength','strideLength','speedSelect','showTimestamps','autoScrollTranscript'];
 
 function toast(message, ms = 2600) {
   els.toast.textContent = message;
@@ -147,11 +152,13 @@ async function selectItem(id) {
   els.audioPlayer.load();
   els.currentFileName.textContent = item.file.name;
   els.currentFileMeta.textContent = `${formatBytes(item.file.size)} · ${item.file.type || 'audio'} · ${item.duration ? formatTime(item.duration) : '길이 확인 중'}`;
-  state.waveform = null;
+  // v2.2: 파일 선택 시 전체 오디오를 즉시 decode하지 않는다.
+  // 큰 파일에서 UI가 느려지는 가장 큰 원인이었던 중복 decode를 제거한다.
+  state.waveform = item.waveform || null;
+  state.waveformDuration = item.duration || 0;
   drawWaveform();
   renderTranscript(item);
   updateControls();
-  try { await analyzeForWaveform(item); } catch (e) { console.warn('Waveform decode failed:', e); }
 }
 
 function renderQueue() {
@@ -193,23 +200,47 @@ async function decodeBlob(blob) {
   const ctx = new AudioCtx();
   try {
     const arr = await blob.arrayBuffer();
-    return await ctx.decodeAudioData(arr.slice(0));
+    return await ctx.decodeAudioData(arr);
   } finally {
     await ctx.close().catch(() => {});
   }
 }
 
 async function resampleMono16k(audioBuffer) {
+  // 이미 Whisper 입력 규격이면 OfflineAudioContext를 만들지 않는다.
+  if (audioBuffer.sampleRate === 16000 && audioBuffer.numberOfChannels === 1) {
+    return audioBuffer.getChannelData(0).slice();
+  }
   const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   if (!OfflineCtx) throw new Error('OfflineAudioContext를 지원하지 않습니다.');
-  const frames = Math.ceil(audioBuffer.duration * 16000);
+  const frames = Math.max(1, Math.ceil(audioBuffer.duration * 16000));
   const offline = new OfflineCtx(1, frames, 16000);
   const source = offline.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(offline.destination);
   source.start(0);
   const rendered = await offline.startRendering();
-  return new Float32Array(rendered.getChannelData(0));
+  return rendered.getChannelData(0).slice();
+}
+
+function waveformFromPcm(item, audio, duration) {
+  const bins = 900;
+  const step = Math.max(1, Math.floor(audio.length / bins));
+  const wave = new Float32Array(Math.min(bins, Math.ceil(audio.length / step)));
+  for (let i = 0; i < wave.length; i++) {
+    let peak = 0;
+    const start = i * step, end = Math.min(audio.length, start + step);
+    for (let j = start; j < end; j += 4) peak = Math.max(peak, Math.abs(audio[j]));
+    wave[i] = peak;
+  }
+  item.waveform = wave;
+  item.duration = duration || item.duration;
+  if (item.id === state.currentId) {
+    state.waveform = wave;
+    state.waveformDuration = item.duration || duration || 0;
+    drawWaveform();
+    renderQueue();
+  }
 }
 
 async function analyzeForWaveform(item) {
@@ -347,23 +378,30 @@ async function convertItemToWav(item, { range = false, download = true, forceStt
 async function audioToFloat32(item, rangeOnly = false) {
   let source = item.wavBlob || item.file;
   let decoded;
+  const prepStart = performance.now();
+  els.sttMetrics.textContent = `오디오 준비 중 · ${formatBytes(item.file.size)} · 전체 decode 1회`;
   try {
     decoded = await decodeBlob(source);
   } catch (firstError) {
-    els.sttStatus.textContent = '브라우저 디코딩 불가 → FFmpeg로 16 kHz WAV 변환 중...';
+    els.sttStatus.textContent = '브라우저 디코딩 불가 → FFmpeg로 16 kHz mono WAV 변환 중...';
     source = await convertItemToWav(item, { range: false, download: false, forceStt: true });
     decoded = await decodeBlob(source);
   }
+  const decodedDuration = decoded.duration;
   let audio = await resampleMono16k(decoded);
+  // STT용 16 kHz PCM으로 파형도 동시에 생성한다. 파일 선택 시 별도 decode하지 않는다.
+  waveformFromPcm(item, audio, decodedDuration);
   let offset = 0;
   if (rangeOnly) {
     const s = Math.max(0, Number(els.rangeStart.value) || 0);
-    const e = Math.min(decoded.duration, Math.max(s, Number(els.rangeEnd.value) || decoded.duration));
+    const e = Math.min(decodedDuration, Math.max(s, Number(els.rangeEnd.value) || decodedDuration));
     const a = Math.floor(s * 16000), b = Math.max(a + 1, Math.floor(e * 16000));
     audio = audio.slice(a, Math.min(b, audio.length));
     offset = s;
   }
-  return { audio, offset, duration: audio.length / 16000 };
+  const prepSec = (performance.now() - prepStart) / 1000;
+  els.sttMetrics.textContent = `오디오 준비 완료 · ${formatTime(audio.length/16000)} · PCM ${(audio.byteLength/1048576).toFixed(1)} MB · ${prepSec.toFixed(1)}초`;
+  return { audio, offset, duration: audio.length / 16000, prepSec };
 }
 
 async function detectWebGPU() {
@@ -383,19 +421,78 @@ function selectedDevice() {
   return v === 'auto' ? (state.webgpuAvailable ? 'webgpu' : 'wasm') : v;
 }
 
+function formatEffectiveDtype(dtype) {
+  if (!dtype) return 'auto';
+  if (typeof dtype === 'string') return dtype;
+  return Object.entries(dtype).map(([k,v]) => `${k.replace('_model','')}:${v}`).join(' / ');
+}
+
+function applyPerformancePreset(value = els.performancePreset.value, persist = true) {
+  if (value === 'fast') {
+    els.modelSelect.value = 'onnx-community/whisper-tiny';
+    els.dtypeSelect.value = 'auto';
+    els.chunkLength.value = '30';
+    els.strideLength.value = '3';
+  } else if (value === 'balanced') {
+    els.modelSelect.value = 'onnx-community/whisper-base';
+    els.dtypeSelect.value = 'auto';
+    els.chunkLength.value = '30';
+    els.strideLength.value = '4';
+  } else if (value === 'accurate') {
+    els.modelSelect.value = 'onnx-community/whisper-small';
+    els.dtypeSelect.value = 'auto';
+    els.chunkLength.value = '30';
+    els.strideLength.value = '5';
+  }
+  state.sttReadyKey = '';
+  if (persist) saveSettings();
+}
+
+function stopSttTicker() {
+  if (state.sttTicker) clearInterval(state.sttTicker);
+  state.sttTicker = 0;
+}
+
+function startSttTicker(device, duration) {
+  stopSttTicker();
+  state.sttStartedAt = performance.now();
+  state.sttLastProgressAt = performance.now();
+  state.sttCompletedChunks = 0;
+  state.sttTotalChunks = 0;
+  state.sttTicker = setInterval(() => {
+    if (!state.sttBusy) return stopSttTicker();
+    const elapsed = (performance.now() - state.sttStartedAt) / 1000;
+    const since = (performance.now() - state.sttLastProgressAt) / 1000;
+    const chunkInfo = state.sttTotalChunks
+      ? `${state.sttCompletedChunks}/${state.sttTotalChunks} chunks`
+      : '첫 chunk 계산 중';
+    els.sttMetrics.textContent = `${device === 'webgpu' ? 'GPU WebGPU' : 'CPU WASM'} · ${chunkInfo} · 경과 ${formatTime(elapsed)} · 오디오 ${formatTime(duration)}${since > 25 ? ' · 추론은 계속 실행 중' : ''}`;
+  }, 1000);
+}
+
+function resetSttWorker() {
+  if (state.sttWorker) state.sttWorker.terminate();
+  state.sttWorker = null;
+  state.sttReadyKey = '';
+}
+
 function initSttWorker() {
   if (state.sttWorker) return state.sttWorker;
-  const worker = new Worker(new URL('./stt-worker.js', import.meta.url), { type: 'module' });
+  const worker = new Worker(new URL('./stt-worker.js?v=2.2.0', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }) => {
     if (data.type === 'model-progress') {
       const p = data.progress || {};
       let pct = Number(p.progress);
-      if (Number.isFinite(pct)) {
-        if (pct <= 1) pct *= 100;
+      if (p.status === 'progress_total' && Number.isFinite(pct)) {
         els.modelProgress.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+        els.sttStatus.textContent = `AI 모델 다운로드/준비 ${pct.toFixed(0)}%`;
+      } else if (p.status === 'progress') {
+        if (Number.isFinite(pct) && pct <= 1) pct *= 100;
+        const file = p.file ? p.file.split('/').pop() : '';
+        els.sttStatus.textContent = `모델 파일 준비 ${file}${Number.isFinite(pct) ? ` ${pct.toFixed(0)}%` : ''}`;
+      } else if (p.status) {
+        els.sttStatus.textContent = `AI 모델 준비 · ${p.status}`;
       }
-      const file = p.file ? p.file.split('/').pop() : '';
-      els.sttStatus.textContent = p.status === 'progress' ? `모델 다운로드 ${file} ${Number.isFinite(pct) ? pct.toFixed(0)+'%' : ''}` : `모델 준비: ${p.status || '처리 중'} ${file}`;
       return;
     }
     if (data.type === 'model-ready') {
@@ -404,13 +501,31 @@ function initSttWorker() {
       els.engineBadge.textContent = data.device === 'webgpu' ? 'WebGPU 준비됨' : 'CPU WASM 준비됨';
       els.engineBadge.className = 'badge ok';
       els.sttStatus.textContent = `모델 준비 완료 · ${data.model.split('/').pop()} · ${data.device}`;
-      for (const [, p] of state.sttPending) if (p.kind === 'load') { p.resolve(); state.sttPending.delete(p.id); break; }
+      els.sttMetrics.textContent = `실제 정밀도: ${formatEffectiveDtype(data.effectiveDtype)} · WASM threads ${data.wasmThreads || 1}`;
+      const p = data.id ? state.sttPending.get(data.id) : null;
+      if (p) { state.sttPending.delete(data.id); p.resolve(data); }
       return;
     }
-    if (data.type === 'inference-start') { els.sttStatus.textContent = 'Whisper 추론 중… 긴 음성은 시간이 걸릴 수 있습니다.'; return; }
+    if (data.type === 'inference-start') {
+      state.sttLastProgressAt = performance.now();
+      state.sttTotalChunks = data.totalChunks || 1;
+      state.sttCompletedChunks = 0;
+      els.modelProgress.style.width = '0%';
+      els.sttStatus.textContent = `Whisper 추론 시작 · ${data.totalChunks || 1}개 chunk`;
+      return;
+    }
+    if (data.type === 'inference-progress') {
+      state.sttLastProgressAt = performance.now();
+      state.sttCompletedChunks = data.completed || 0;
+      state.sttTotalChunks = data.total || state.sttTotalChunks || 1;
+      const pct = Math.max(0, Math.min(100, Number(data.progress) || 0));
+      els.modelProgress.style.width = `${pct}%`;
+      els.sttStatus.textContent = `Whisper 추론 ${state.sttCompletedChunks}/${state.sttTotalChunks} · ${pct.toFixed(0)}%`;
+      return;
+    }
     if (data.type === 'transcription-result') {
       const p = state.sttPending.get(data.id);
-      if (p) { state.sttPending.delete(data.id); p.resolve(data.result); }
+      if (p) { state.sttPending.delete(data.id); p.resolve({ result: data.result, stats: data.stats || null }); }
       return;
     }
     if (data.type === 'error') {
@@ -424,15 +539,13 @@ function initSttWorker() {
     console.error(e); els.sttStatus.textContent = `STT Worker 오류: ${e.message}`;
     for (const [,p] of state.sttPending) p.reject(new Error(e.message || 'STT Worker 오류'));
     state.sttPending.clear();
+    resetSttWorker();
   };
   state.sttWorker = worker;
   return worker;
 }
 
-async function ensureModel() {
-  const device = selectedDevice();
-  const model = els.modelSelect.value;
-  const dtype = els.dtypeSelect.value || 'auto';
+async function loadModelFor(device, model, dtype) {
   const key = `${model}|${device}|${dtype}`;
   if (state.sttReadyKey === key) return { model, device, dtype };
   const worker = initSttWorker();
@@ -441,9 +554,27 @@ async function ensureModel() {
   const id = `load-${Date.now()}-${Math.random()}`;
   await new Promise((resolve, reject) => {
     state.sttPending.set(id, { id, kind: 'load', resolve, reject });
-    worker.postMessage({ type: 'load', model, device, dtype });
+    worker.postMessage({ type: 'load', id, model, device, dtype });
   });
   return { model, device, dtype };
+}
+
+async function ensureModel() {
+  let device = selectedDevice();
+  const model = els.modelSelect.value;
+  const dtype = els.dtypeSelect.value || 'auto';
+  try {
+    return await loadModelFor(device, model, dtype);
+  } catch (error) {
+    // Auto 모드에서 WebGPU 초기화 실패 시 사용자가 다시 누를 필요 없이 CPU q8로 전환한다.
+    if (els.engineSelect.value === 'auto' && device === 'webgpu') {
+      els.sttStatus.textContent = `WebGPU 준비 실패 → CPU WASM 자동 전환: ${error.message}`;
+      resetSttWorker();
+      device = 'wasm';
+      return await loadModelFor(device, model, dtype);
+    }
+    throw error;
+  }
 }
 
 function normalizeResult(result, offset, duration) {
@@ -459,32 +590,101 @@ function normalizeResult(result, offset, duration) {
   return { text, chunks };
 }
 
+async function dispatchInference({ audio, item, model, device, dtype, options, preserveAudio = false }) {
+  const id = `stt-${item.id}-${Date.now()}-${Math.random()}`;
+  const promise = new Promise((resolve, reject) => state.sttPending.set(id, { id, kind: 'stt', resolve, reject }));
+  state.sttLastProgressAt = performance.now();
+  const worker = initSttWorker();
+  const message = { type: 'transcribe', id, model, device, dtype, audioBuffer: audio.buffer, options };
+  if (preserveAudio) worker.postMessage(message); // WebGPU 실패 시 CPU 재시도용으로 원본 유지
+  else worker.postMessage(message, [audio.buffer]);
+
+  let watchdog = 0;
+  if (els.engineSelect.value === 'auto' && device === 'webgpu') {
+    watchdog = setInterval(() => {
+      const idleMs = performance.now() - state.sttLastProgressAt;
+      if (idleMs < 120000) return;
+      clearInterval(watchdog); watchdog = 0;
+      const pending = state.sttPending.get(id);
+      if (pending) {
+        state.sttPending.delete(id);
+        pending.reject(new Error('WEBGPU_STALL'));
+      }
+      resetSttWorker();
+    }, 5000);
+  }
+  try {
+    return await promise;
+  } finally {
+    if (watchdog) clearInterval(watchdog);
+  }
+}
+
 async function transcribeItem(item) {
   if (!item) throw new Error('STT할 파일을 선택하세요.');
-  const { model, device, dtype } = await ensureModel();
   state.sttBusy = true; updateControls(); els.cancelSttBtn.disabled = false;
-  setStatus(item, 'stt', 'STT 처리 중');
+  setStatus(item, 'stt', 'STT 준비 중');
   const rangeOnly = els.rangeOnlyCheckbox.checked && item.id === state.currentId;
   els.sttStatus.textContent = '오디오를 16 kHz mono로 준비 중...';
-  const { audio, offset, duration } = await audioToFloat32(item, rangeOnly);
-  const id = `stt-${item.id}-${Date.now()}`;
+
+  let audioInfo;
+  try {
+    audioInfo = await audioToFloat32(item, rangeOnly);
+  } catch (e) {
+    state.sttBusy = false; els.cancelSttBtn.disabled = true; updateControls();
+    setStatus(item, 'ready', '오디오 준비 오류');
+    throw e;
+  }
+
+  const { audio, offset, duration, prepSec } = audioInfo;
+  let { model, device, dtype } = await ensureModel();
   const options = {
     language: els.languageSelect.value,
     task: els.taskSelect.value,
     timestamps: els.timestampSelect.value,
-    chunkLength: Math.max(10, Math.min(60, Number(els.chunkLength.value) || 30)),
-    strideLength: Math.max(0, Math.min(15, Number(els.strideLength.value) || 5))
+    // Whisper는 기본적으로 30초 컨텍스트를 사용. CPU/GPU 모두 최대 30초로 제한한다.
+    chunkLength: Math.max(10, Math.min(30, Number(els.chunkLength.value) || 30)),
+    strideLength: Math.max(0, Math.min(5, Number(els.strideLength.value) || 3))
   };
-  const promise = new Promise((resolve, reject) => state.sttPending.set(id, { id, kind: 'stt', resolve, reject }));
-  initSttWorker().postMessage({ type: 'transcribe', id, model, device, dtype, audioBuffer: audio.buffer, options }, [audio.buffer]);
-  const result = await promise;
+
+  startSttTicker(device, duration);
+  setStatus(item, 'stt', `STT · ${device === 'webgpu' ? 'GPU' : 'CPU'}`);
+  let bundle;
+  try {
+    bundle = await dispatchInference({
+      audio, item, model, device, dtype, options,
+      preserveAudio: els.engineSelect.value === 'auto' && device === 'webgpu'
+    });
+  } catch (error) {
+    if (els.engineSelect.value === 'auto' && device === 'webgpu') {
+      const reason = error.message === 'WEBGPU_STALL' ? '120초 동안 chunk 진행이 없음' : error.message;
+      els.sttStatus.textContent = `WebGPU 추론 문제 → CPU WASM 자동 재시도 (${reason})`;
+      els.sttMetrics.textContent = 'GPU 작업을 종료하고 CPU q8 모델로 안전하게 전환 중...';
+      resetSttWorker();
+      ({ model, device, dtype } = await loadModelFor('wasm', model, dtype));
+      startSttTicker(device, duration);
+      bundle = await dispatchInference({ audio, item, model, device, dtype, options, preserveAudio: false });
+    } else {
+      throw error;
+    }
+  }
+
+  const result = bundle?.result || bundle;
+  const stats = bundle?.stats || null;
   const normalized = normalizeResult(result, offset, duration);
   item.transcript = normalized.text;
   item.chunks = normalized.chunks;
-  item.sttMeta = { model, device, dtype, ...options, rangeOnly, processedAt: new Date().toISOString() };
+  item.sttMeta = { model, device, dtype, ...options, rangeOnly, prepSec, stats, processedAt: new Date().toISOString() };
   setStatus(item, 'done', 'STT 완료');
   if (item.id === state.currentId) renderTranscript(item);
+  els.modelProgress.style.width = '100%';
   els.sttStatus.textContent = `완료 · ${normalized.text.length.toLocaleString()}자 · ${normalized.chunks.length}개 타임 구간`;
+  if (stats?.elapsedMs) {
+    const inferSec = stats.elapsedMs / 1000;
+    const speed = inferSec > 0 ? duration / inferSec : 0;
+    els.sttMetrics.textContent = `오디오 준비 ${prepSec.toFixed(1)}초 · 추론 ${formatTime(inferSec)} · ${speed.toFixed(2)}× 실시간 · ${stats.totalChunks || 1} chunks · ${device}`;
+  }
+  stopSttTicker();
   state.sttBusy = false; els.cancelSttBtn.disabled = true; updateControls(); saveSettings();
   return item;
 }
@@ -493,8 +693,8 @@ function cancelStt() {
   if (!state.sttWorker) return;
   state.sttWorker.terminate(); state.sttWorker = null; state.sttReadyKey = '';
   for (const [,p] of state.sttPending) p.reject(new Error('사용자가 작업을 취소했습니다.'));
-  state.sttPending.clear(); state.sttBusy = false; state.batchRunning = false;
-  els.cancelSttBtn.disabled = true; els.sttStatus.textContent = 'STT 작업을 취소했습니다.'; updateControls();
+  state.sttPending.clear(); state.sttBusy = false; state.batchRunning = false; stopSttTicker();
+  els.cancelSttBtn.disabled = true; els.sttStatus.textContent = 'STT 작업을 취소했습니다.'; els.sttMetrics.textContent='취소됨'; updateControls();
   const item = currentItem(); if (item?.status === 'stt') setStatus(item, 'ready', '취소됨');
 }
 
@@ -636,6 +836,7 @@ async function inspectSystem() {
     ['Secure Context', window.isSecureContext, window.isSecureContext ? 'HTTPS · 마이크 사용 가능' : 'HTTPS 필요'],
     ['WebAssembly', typeof WebAssembly !== 'undefined', 'CPU 로컬 추론 기반'],
     ['WebGPU', state.webgpuAvailable, state.webgpuAvailable ? 'GPU 추론 가능' : 'CPU WASM으로 자동 전환'],
+    ['Cross-Origin Isolation', self.crossOriginIsolated, self.crossOriginIsolated ? `WASM 멀티스레드 사용 가능 · 최대 ${Math.min(4, navigator.hardwareConcurrency || 4)} threads` : '첫 설치 후 한 번 새로고침하면 CPU 멀티스레드 활성화'],
     ['MediaRecorder', !!window.MediaRecorder, '녹음 · pause/resume'],
     ['Service Worker', 'serviceWorker' in navigator, 'PWA 앱 셸 캐시'],
     ['모델 캐시', 'caches' in window, 'Transformers.js Cache API'],
@@ -647,6 +848,24 @@ async function inspectSystem() {
   els.systemCards.innerHTML = cards.map(([name,ok,desc]) => `<div class="system-card ${ok ? 'ok' : 'warn'}"><strong>${ok ? '✓' : '△'} ${escapeHtml(name)}</strong><span>${escapeHtml(desc)}</span></div>`).join('');
   els.engineBadge.textContent = state.webgpuAvailable ? 'WebGPU 사용 가능' : 'CPU WASM 사용'; els.engineBadge.className = state.webgpuAvailable ? 'badge ok' : 'badge warn';
   els.footerStatus.textContent = state.webgpuAvailable ? 'WebGPU GPU 사용 가능' : 'WebAssembly CPU 모드';
+}
+
+async function clearAiModelCache() {
+  if (state.sttBusy) throw new Error('STT 작업 중에는 모델 캐시를 지울 수 없습니다.');
+  resetSttWorker();
+  let deleted = 0;
+  if ('caches' in window) {
+    const keys = await caches.keys();
+    for (const key of keys) {
+      if (/transformers|huggingface|onnx/i.test(key)) {
+        if (await caches.delete(key)) deleted += 1;
+      }
+    }
+  }
+  els.modelProgress.style.width = '0%';
+  els.sttStatus.textContent = 'AI 모델 캐시를 지웠습니다. 다음 실행 시 모델을 다시 다운로드합니다.';
+  els.sttMetrics.textContent = `삭제된 AI 캐시: ${deleted}개`;
+  toast('AI 모델 캐시를 정리했습니다.');
 }
 
 function saveSettings() {
@@ -661,6 +880,7 @@ function loadSettings() {
     const obj = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     settingsFields.forEach(k => { if (!(k in obj)) return; const el = els[k]; if (el.type === 'checkbox') el.checked = !!obj[k]; else el.value = obj[k]; });
     if (obj.theme === 'dark') document.documentElement.dataset.theme = 'dark';
+    if (els.performancePreset.value !== 'custom') applyPerformancePreset(els.performancePreset.value, false);
   } catch {}
 }
 
@@ -681,7 +901,7 @@ function setupEvents() {
   els.dropZone.addEventListener('keydown', e => { if (e.key === 'Enter') els.fileInput.click(); });
   els.clearQueueBtn.addEventListener('click', () => { state.items.forEach(x => URL.revokeObjectURL(x.url)); state.items = []; state.currentId = null; renderQueue(); clearCurrent(); });
 
-  els.audioPlayer.addEventListener('loadedmetadata', () => { const item = currentItem(); if (item && Number.isFinite(els.audioPlayer.duration)) { item.duration = els.audioPlayer.duration; els.rangeEnd.value = item.duration.toFixed(1); renderQueue(); } updateTimeUI(); });
+  els.audioPlayer.addEventListener('loadedmetadata', () => { const item = currentItem(); if (item && Number.isFinite(els.audioPlayer.duration)) { item.duration = els.audioPlayer.duration; state.waveformDuration=item.duration; els.rangeEnd.value = item.duration.toFixed(1); renderQueue(); } updateTimeUI(); });
   els.audioPlayer.addEventListener('timeupdate', () => { if (state.playRangeEnd != null && els.audioPlayer.currentTime >= state.playRangeEnd) { els.audioPlayer.pause(); state.playRangeEnd = null; } updateTimeUI(); });
   els.audioPlayer.addEventListener('play', () => els.playBtn.textContent = 'Ⅱ');
   els.audioPlayer.addEventListener('pause', () => els.playBtn.textContent = '▶');
@@ -701,7 +921,9 @@ function setupEvents() {
   els.convertBtn.addEventListener('click', () => convertItemToWav(currentItem()).catch(e => { els.convertStatus.textContent=`오류: ${e.message}`; toast(e.message); const i=currentItem(); if(i)setStatus(i,'ready','변환 오류'); }));
   els.convertRangeBtn.addEventListener('click', () => convertItemToWav(currentItem(), {range:true}).catch(e => toast(e.message)));
 
-  ['engineSelect','modelSelect','dtypeSelect'].forEach(k => els[k].addEventListener('change', () => { state.sttReadyKey=''; saveSettings(); }));
+  els.performancePreset.addEventListener('change', () => applyPerformancePreset(els.performancePreset.value));
+  els.engineSelect.addEventListener('change', () => { state.sttReadyKey=''; saveSettings(); });
+  ['modelSelect','dtypeSelect'].forEach(k => els[k].addEventListener('change', () => { els.performancePreset.value='custom'; state.sttReadyKey=''; saveSettings(); }));
   ['languageSelect','taskSelect','timestampSelect','chunkLength','strideLength'].forEach(k => els[k].addEventListener('change', saveSettings));
   els.loadModelBtn.addEventListener('click', () => ensureModel().catch(e => { els.sttStatus.textContent=`오류: ${e.message}`; toast(e.message); }));
   els.transcribeBtn.addEventListener('click', async () => { try { await transcribeItem(currentItem()); } catch(e) { state.sttBusy=false; els.cancelSttBtn.disabled=true; updateControls(); els.sttStatus.textContent=`오류: ${e.message}`; toast(e.message,4000); const i=currentItem(); if(i)setStatus(i,'ready','STT 오류'); } });
@@ -726,6 +948,7 @@ function setupEvents() {
 
   els.recordBtn.addEventListener('click', () => startRecording().catch(e => toast(`녹음 시작 실패: ${e.message}`,4000)));
   els.pauseRecordBtn.addEventListener('click', toggleRecordPause); els.stopRecordBtn.addEventListener('click', stopRecording);
+  els.clearAiCacheBtn.addEventListener('click', () => clearAiModelCache().catch(e => toast(e.message, 4000)));
   els.refreshSystemBtn.addEventListener('click', inspectSystem); els.helpBtn.addEventListener('click',()=>els.helpDialog.showModal());
   els.themeBtn.addEventListener('click', () => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; saveSettings(); drawWaveform(); });
   window.addEventListener('resize', drawWaveform);
@@ -744,7 +967,17 @@ async function init() {
   loadSettings(); setupEvents(); renderQueue(); updateControls();
   els.audioPlayer.playbackRate = Number(els.speedSelect.value || 1);
   await inspectSystem();
-  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('./sw.js').catch(console.warn);
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!sessionStorage.getItem('lws-coi-reload')) {
+        sessionStorage.setItem('lws-coi-reload', '1');
+        location.reload();
+      }
+    }, { once: true });
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      .then(r => r.update().catch(()=>{}))
+      .catch(console.warn);
+  }
   refreshMicList().catch(()=>{});
 }
 
