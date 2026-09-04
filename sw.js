@@ -1,7 +1,7 @@
-const CACHE = 'local-whisper-studio-v2-2-0';
+const CACHE = 'local-whisper-studio-v2-3-0';
 const APP_SHELL = [
-  './', './index.html', './styles.css?v=2.2.0', './app.js?v=2.2.0',
-  './ffmpeg-client.js', './ffmpeg-worker.js', './stt-worker.js?v=2.2.0',
+  './', './index.html', './styles.css?v=2.3.0', './app.js?v=2.3.0',
+  './ffmpeg-client.js', './ffmpeg-worker.js', './stt-worker.js?v=2.3.0',
   './manifest.webmanifest', './icons/icon.svg', './samples/whisper-test.wav'
 ];
 

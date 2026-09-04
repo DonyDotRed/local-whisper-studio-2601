@@ -152,7 +152,7 @@ async function selectItem(id) {
   els.audioPlayer.load();
   els.currentFileName.textContent = item.file.name;
   els.currentFileMeta.textContent = `${formatBytes(item.file.size)} · ${item.file.type || 'audio'} · ${item.duration ? formatTime(item.duration) : '길이 확인 중'}`;
-  // v2.2: 파일 선택 시 전체 오디오를 즉시 decode하지 않는다.
+  // v2.3: 파일 선택 시 전체 오디오를 즉시 decode하지 않는다.
   // 큰 파일에서 UI가 느려지는 가장 큰 원인이었던 중복 decode를 제거한다.
   state.waveform = item.waveform || null;
   state.waveformDuration = item.duration || 0;
@@ -478,7 +478,7 @@ function resetSttWorker() {
 
 function initSttWorker() {
   if (state.sttWorker) return state.sttWorker;
-  const worker = new Worker(new URL('./stt-worker.js?v=2.2.0', import.meta.url), { type: 'module' });
+  const worker = new Worker(new URL('./stt-worker.js?v=2.3.0', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }) => {
     if (data.type === 'model-progress') {
       const p = data.progress || {};
@@ -495,13 +495,19 @@ function initSttWorker() {
       }
       return;
     }
+    if (data.type === 'model-fallback') {
+      els.sttStatus.textContent = `양자화 모델 호환성 문제 → 안전 정밀도로 자동 전환`;
+      els.sttMetrics.textContent = `Transformers.js ${data.runtimeVersion || '3.8.1'} · ${formatEffectiveDtype(data.from)} → ${formatEffectiveDtype(data.to)}`;
+      toast('모델 정밀도를 자동으로 안전 모드로 전환했습니다.', 4500);
+      return;
+    }
     if (data.type === 'model-ready') {
       state.sttReadyKey = `${data.model}|${data.device}|${data.dtype || 'auto'}`;
       els.modelProgress.style.width = '100%';
       els.engineBadge.textContent = data.device === 'webgpu' ? 'WebGPU 준비됨' : 'CPU WASM 준비됨';
       els.engineBadge.className = 'badge ok';
       els.sttStatus.textContent = `모델 준비 완료 · ${data.model.split('/').pop()} · ${data.device}`;
-      els.sttMetrics.textContent = `실제 정밀도: ${formatEffectiveDtype(data.effectiveDtype)} · WASM threads ${data.wasmThreads || 1}`;
+      els.sttMetrics.textContent = `실제 정밀도: ${formatEffectiveDtype(data.effectiveDtype)} · Transformers.js ${data.runtimeVersion || '3.8.1'} · WASM threads ${data.wasmThreads || 1}`;
       const p = data.id ? state.sttPending.get(data.id) : null;
       if (p) { state.sttPending.delete(data.id); p.resolve(data); }
       return;
@@ -511,7 +517,7 @@ function initSttWorker() {
       state.sttTotalChunks = data.totalChunks || 1;
       state.sttCompletedChunks = 0;
       els.modelProgress.style.width = '0%';
-      els.sttStatus.textContent = `Whisper 추론 시작 · ${data.totalChunks || 1}개 chunk`;
+      els.sttStatus.textContent = `Whisper 순차 추론 시작 · ${data.totalChunks || 1}개 chunk`;
       return;
     }
     if (data.type === 'inference-progress') {
@@ -682,7 +688,7 @@ async function transcribeItem(item) {
   if (stats?.elapsedMs) {
     const inferSec = stats.elapsedMs / 1000;
     const speed = inferSec > 0 ? duration / inferSec : 0;
-    els.sttMetrics.textContent = `오디오 준비 ${prepSec.toFixed(1)}초 · 추론 ${formatTime(inferSec)} · ${speed.toFixed(2)}× 실시간 · ${stats.totalChunks || 1} chunks · ${device}`;
+    els.sttMetrics.textContent = `오디오 준비 ${prepSec.toFixed(1)}초 · 추론 ${formatTime(inferSec)} · ${speed.toFixed(2)}× 실시간 · ${stats.totalChunks || 1} chunks · ${device} · TJS ${stats.runtimeVersion || '3.8.1'}`;
   }
   stopSttTicker();
   state.sttBusy = false; els.cancelSttBtn.disabled = true; updateControls(); saveSettings();

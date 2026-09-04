@@ -7,8 +7,8 @@
   <meta name="description" content="서버 업로드 없이 브라우저에서 실행되는 로컬 오디오 변환·녹음·Whisper STT 도구" />
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="./styles.css?v=2.2.0" />
-  <title>Local Whisper Studio 2.2</title>
+  <link rel="stylesheet" href="./styles.css?v=2.3.0" />
+  <title>Local Whisper Studio 2.3</title>
 </head>
 <body>
   <div id="app">
@@ -223,9 +223,9 @@
                 <label for="dtypeSelect">모델 정밀도</label>
                 <select id="dtypeSelect">
                   <option value="auto" selected>자동 최적화 · 권장</option>
-                  <option value="q8">Q8 · 메모리 절약</option>
-                  <option value="q4">Q4 · 최소 용량</option>
-                  <option value="fp16">FP16 · GPU</option>
+                  <option value="q8">Q8 · CPU/WASM 경량</option>
+                  <option value="q4">Q4 · GPU 경량 · 자동 복구</option>
+                  <option value="fp16">FP16 · GPU · 호환성 확인</option>
                   <option value="fp32">FP32 · 최고 정밀도</option>
                 </select>
               </div>
@@ -298,7 +298,7 @@
     </main>
 
     <footer>
-      <span>Local Whisper Studio 2.2 · Optimized GitHub Pages</span>
+      <span>Local Whisper Studio 2.3 · Optimized GitHub Pages</span>
       <span id="footerStatus">브라우저 로컬 처리</span>
     </footer>
   </div>
@@ -311,17 +311,17 @@
         <li>M4A 등은 필요하면 <b>WAV 변환</b>으로 16 kHz mono WAV로 저장할 수 있습니다.</li>
         <li>처음에는 <b>빠른 전사 · Tiny</b> 프리셋을 권장합니다. 5분 테스트에 가장 적합합니다.</li>
         <li><b>AI 모델 준비</b>를 누르면 선택한 Whisper 모델을 최초 1회 다운로드하고 브라우저에 캐시합니다.</li>
-        <li><b>텍스트 변환</b>을 실행합니다. WebGPU가 있으면 GPU를 우선 사용하며, 각 Whisper chunk 완료 시 실제 진행률을 표시합니다.</li>
+        <li><b>텍스트 변환</b>을 실행합니다. WebGPU가 있으면 GPU를 우선 사용하며, 30초 이하의 작은 chunk를 순차 처리해 각 chunk 완료 시 실제 진행률을 표시합니다.</li>
         <li>결과를 TXT, Markdown, SRT, VTT, JSON으로 저장할 수 있습니다.</li>
       </ol>
       <h3>권장 환경</h3>
-      <p>최신 Chrome/Edge + WebGPU 지원 GPU. 5~30분 파일은 Tiny 또는 Base를 권장합니다. Small/Large는 정확도가 필요하고 GPU 여유가 있을 때 사용하세요. GitHub Pages의 CPU(WASM)는 단일 스레드가 될 수 있으므로 Tiny가 가장 안정적입니다.</p>
+      <p>최신 Chrome/Edge + WebGPU 지원 GPU. 5~30분 파일은 Tiny 또는 Base를 권장합니다. 안정성을 위해 Whisper 런타임은 Transformers.js 3.8.1로 고정되어 있으며, q4/q8 세션 생성이 실패하면 fp32로 자동 복구합니다. Small/Large는 정확도가 필요하고 GPU 여유가 있을 때 사용하세요.</p>
       <h3>단축키</h3>
       <ul><li>Space: 재생/일시정지</li><li>Ctrl/Cmd + O: 파일 열기</li><li>← / →: 5초 이동</li></ul>
     </form>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js?v=2.2.0"></script>
+  <script type="module" src="./app.js?v=2.3.0"></script>
 </body>
 </html>

@@ -168,7 +168,7 @@ dialog::backdrop { background: rgba(3,7,18,.55); backdrop-filter: blur(4px); }
 
 .sample-btn { width: 100%; margin-top: 8px; }
 
-/* v2.2 STT performance diagnostics */
+/* v2.3 STT performance diagnostics */
 .stt-metrics {
   margin-top: 8px;
   padding: 8px 10px;

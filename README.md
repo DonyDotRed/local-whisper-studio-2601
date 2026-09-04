@@ -1,46 +1,42 @@
-# Local Whisper Studio 2.2 — Optimized GitHub Pages Edition
+# Local Whisper Studio 2.3 — Optimized GitHub Pages Edition
 
 GitHub Pages에서 실행되는 **완전 정적(static), 서버 업로드 없는 로컬 오디오 변환·녹음·Whisper STT 웹앱**입니다.
 
-이번 2.2 버전은 5분 정도의 파일에서도 이전 버전이 지나치게 느리거나 `처리중`으로만 보이던 문제를 중심으로 STT 경로를 다시 최적화했습니다.
+이번 2.3 버전은 **Transformers.js 4.2.0 / ONNX Runtime 1.26 계열에서 발생하는 Whisper q4/q8 세션 생성 오류**와 5분 이상 음성에서 진행이 멈춘 것처럼 보이는 문제를 우선 해결한 안정화판입니다.
 
-## 2.2에서 달라진 핵심
+## 2.3에서 달라진 핵심
 
-1. **중복 오디오 decode 제거**
-   - 이전: 파일 선택 시 파형용 전체 decode → STT 시작 시 다시 전체 decode.
-   - 2.2: 파일 선택 시 전체 decode하지 않음 → STT 시작 시 **한 번만 decode/resample** → 같은 16 kHz PCM으로 파형까지 생성.
+1. **Whisper 런타임을 Transformers.js 3.8.1로 고정**
+   - 4.2.0 계열에서 보고된 `Missing required scale` / `TransposeDQWeightsForMatMulNBits` 회귀를 우회합니다.
+   - `onnx-community/whisper-*` 모델과 WebGPU/WASM 조합을 계속 사용합니다.
 
-2. **빠른 전사(Tiny)가 기본값**
-   - 5~30분 파일의 첫 테스트는 `Tiny`를 기본으로 사용.
-   - `Base`는 균형, `Small`은 정확도 우선 프리셋으로 분리.
+2. **q4/q8 실패 시 fp32 자동 복구**
+   - Auto 모드: CPU/WASM은 q8을 먼저 시도하고 실패하면 fp32로 재시도합니다.
+   - Auto 모드: WebGPU는 encoder fp32 + decoder q4를 먼저 시도하고 실패하면 fp32 decoder로 자동 재시도합니다.
+   - 사용자가 q4/q8/fp16을 직접 선택해도 세션 생성 오류가 나면 안전 정밀도로 복구합니다.
 
-3. **장시간 STT 실제 진행률 표시**
-   - 30초 이하: Whisper 1회 추론.
-   - 30초 초과: Whisper chunk pipeline 사용.
-   - 각 chunk가 끝날 때 `3/11 chunks · 27%`처럼 실제 진행률 표시.
-   - 경과 시간과 처리 chunk가 계속 표시되므로 정상 추론 중인지 확인 가능.
+3. **장시간 오디오를 수동 순차 chunk 추론으로 변경**
+   - 30초 이하의 작은 조각만 Whisper에 한 번씩 전달합니다.
+   - 5분 음성은 기본값(30초, overlap 3초)에서 약 11개 chunk로 처리됩니다.
+   - 각 chunk가 완료될 때 `3/11 chunks · 27%`처럼 실제 진행률을 표시합니다.
+   - 전체 5분 배열을 Transformers.js 장음성 pipeline에 한 번에 맡기지 않습니다.
 
-4. **브라우저별 자동 dtype 최적화**
-   - CPU/WASM `Auto` → `q8`.
-   - WebGPU `Auto` → Whisper encoder는 fp32, decoder는 q4 조합.
-   - 사용자가 FP32 전체 모델을 실수로 기본 로딩하는 문제를 방지.
+4. **Overlap 중복 제거**
+   - 각 chunk에서 내부 timestamp를 받아 overlap의 절반씩 소유하도록 병합하여 경계 문장 중복을 줄였습니다.
+   - 화면에서 timestamp를 끈 경우에도 내부 병합에는 timestamp를 사용합니다.
 
-5. **WebGPU 자동 fallback**
-   - Auto 모드에서 WebGPU 모델 로딩이 실패하면 CPU/WASM으로 자동 전환.
-   - WebGPU 추론에서 120초 동안 chunk 진행이 없으면 GPU Worker를 종료하고 CPU로 자동 재시도.
+5. **중복 오디오 decode 제거 유지**
+   - 파일 선택 시 전체 decode하지 않습니다.
+   - STT 시작 시 한 번만 16 kHz mono로 decode/resample하고, 그 PCM을 파형 표시에도 재사용합니다.
 
-6. **CPU WASM 멀티스레드 지원 개선**
-   - Service Worker가 COOP/COEP 헤더를 추가하여 지원 브라우저에서 `crossOriginIsolated` 활성화를 시도.
-   - 활성화되면 ONNX Runtime WASM을 최대 4 threads까지 사용.
-   - 환경 진단 화면에서 Cross-Origin Isolation 활성 여부 확인 가능.
+6. **WebGPU → CPU 자동 fallback 유지**
+   - WebGPU 모델 로딩 실패 시 CPU/WASM으로 자동 전환합니다.
+   - Auto 모드에서 WebGPU 추론이 120초 동안 진전이 없으면 Worker를 종료하고 CPU로 재시도합니다.
 
-7. **구버전 PWA 캐시 문제 수정**
-   - 앱 JS/CSS/HTML은 network-first.
-   - Service Worker cache version을 2.2로 변경.
-   - GitHub Pages에 새 버전을 올렸는데도 옛 코드가 계속 실행되는 현상을 줄임.
-
-8. **AI 모델 캐시 초기화 버튼 추가**
-   - 모델 파일이 비정상적으로 캐시되었거나 설정을 완전히 새로 시작하고 싶을 때 사용.
+7. **CPU WASM 멀티스레드 및 캐시 갱신**
+   - cross-origin isolation이 활성화되면 WASM을 최대 4 threads까지 사용합니다.
+   - Service Worker cache를 2.3으로 올리고 앱 코드는 network-first로 유지합니다.
+   - `AI 모델 캐시 지우기` 버튼으로 이전 런타임에서 받은 모델 캐시를 초기화할 수 있습니다.
 
 ## 권장 설정
 
@@ -72,7 +68,7 @@ STT 실행 후 아래처럼 상태가 변합니다.
         ↓
 모델 준비 완료
         ↓
-Whisper 추론 시작 · 11개 chunk
+Whisper 순차 추론 시작 · 11개 chunk
         ↓
 Whisper 추론 1/11 · 9%
 Whisper 추론 2/11 · 18%
@@ -102,7 +98,7 @@ Whisper 추론 2/11 · 18%
 - Chrome/Edge: `Ctrl + Shift + R`
 - 또는 사이트 데이터/Service Worker 삭제 후 재접속
 
-2.2 Service Worker가 설치될 때 앱이 한 번 자동 새로고침될 수 있습니다. 이는 CPU 멀티스레드 사용을 위한 cross-origin isolation 활성화 과정입니다.
+2.3 Service Worker가 설치될 때 앱이 한 번 자동 새로고침될 수 있습니다. 이는 CPU 멀티스레드 사용을 위한 cross-origin isolation 활성화 과정입니다.
 
 ### 3. WebGPU 문제
 
@@ -213,11 +209,11 @@ M4A/WAV/MP3/녹음
         ▼                ▼
      WebGPU           WASM CPU
         │                │
-  encoder fp32          q8
-  decoder q4       1~4 threads
+ fp32 + q4 우선        q8 우선
+ fp32 자동복구      fp32 자동복구
         └───────┬────────┘
                 ▼
-       30 s chunk inference
+   ≤30 s 수동 순차 inference
                 │
         실제 진행률 표시
                 │
@@ -230,7 +226,7 @@ M4A/WAV/MP3/녹음
 - GitHub Pages에서는 CUDA / faster-whisper / Python `uv` backend를 직접 실행할 수 없습니다.
 - 브라우저 GPU는 CUDA가 아니라 WebGPU입니다.
 - 매우 큰 파일은 브라우저 AudioBuffer 메모리 한계가 있습니다.
-- 장시간 녹음은 chunk inference를 사용하지만 현재 2.2도 입력 오디오 decode 자체는 파일 전체에 대해 수행합니다.
+- 장시간 녹음은 chunk inference를 사용하지만 현재 2.3도 입력 오디오 decode 자체는 파일 전체에 대해 수행합니다.
 - 수 시간 이상 파일을 안정적으로 처리하려면 다음 단계로 WebCodecs/OPFS 기반 streaming decode 구조가 필요합니다.
 
 ## Runtime dependencies
